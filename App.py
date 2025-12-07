@@ -12,24 +12,27 @@ st.set_page_config(page_title="Itlala: Gemini Edition", page_icon="💎", layout
 # --- SIDEBAR: CONFIGURATION ---
 with st.sidebar:
     st.header("⚙️ Settings")
-    st.info("Using Gemini 1.5 Flash (High Quota Limit)")
+    st.info("Using 'Gemini Flash Latest' (Auto-Detect)")
     
     gemini_key = st.text_input("Gemini API Key", value=st.secrets.get("GEMINI_KEY", ""), type="password")
     qdrant_url = st.text_input("Qdrant URL", value=st.secrets.get("QDRANT_URL", ""))
     qdrant_key = st.text_input("Qdrant Key", value=st.secrets.get("QDRANT_KEY", ""), type="password")
 
-    if st.button("🔌 Connect"):
+    if st.button("🔌 Connect & Test"):
         if gemini_key:
             try:
                 genai.configure(api_key=gemini_key)
-                st.success("Gemini Connected!")
+                # Test the model connection immediately
+                model = genai.GenerativeModel('models/gemini-flash-latest')
+                response = model.generate_content("Hello")
+                st.success("✅ Connected Successfully!")
             except Exception as e:
-                st.error(f"Error: {e}")
+                st.error(f"Connection Failed: {e}")
 
 # --- HELPER: GEMINI EMBEDDING ---
 def get_gemini_embedding(text):
     try:
-        # Adding a small delay to prevent hitting rate limits too fast
+        # Adding delay to respect rate limits
         time.sleep(1) 
         result = genai.embed_content(
             model="models/text-embedding-004",
@@ -47,8 +50,10 @@ if gemini_key and qdrant_url and qdrant_key:
     
     # 1. Setup Gemini
     genai.configure(api_key=gemini_key)
-    # FIX: Use 1.5-flash (Stable, Higher Limits) instead of 2.0-exp
-    vision_model = genai.GenerativeModel('models/gemini-1.5-flash') 
+    
+    # --- FIX: Using the generic alias found in your diagnostics list ---
+    # This automatically picks the stable Flash version for your account
+    vision_model = genai.GenerativeModel('models/gemini-flash-latest') 
     
     # 2. Setup Qdrant
     try:
@@ -104,7 +109,13 @@ if gemini_key and qdrant_url and qdrant_key:
                             st.success("✅ Saved to Wardrobe!")
                             
                     except Exception as e:
-                        st.error(f"Error: {e}")
+                        # Detailed error handling to help debug
+                        if "404" in str(e):
+                             st.error("Model Error: 'gemini-flash-latest' not found. Your key might be restricted.")
+                        elif "429" in str(e):
+                             st.error("Quota Error: Too many requests. Please wait a moment.")
+                        else:
+                            st.error(f"Error: {e}")
 
     # --- TAB 2: RECOMMENDATION ---
     with tab2:
@@ -116,25 +127,28 @@ if gemini_key and qdrant_url and qdrant_key:
                 st.warning("Please upload items first!")
             else:
                 with st.spinner("Styling..."):
-                    plan_prompt = f"Describe 1 ideal clothing item for a {event} in {weather}. Return ONLY the visual description."
-                    search_query = vision_model.generate_content(plan_prompt).text
-                    st.write(f"🔍 **Looking for:** {search_query}")
-                    
-                    search_vec = get_gemini_embedding(search_query)
-                    
-                    if search_vec:
-                        hits = q_client.search(
-                            collection_name="itlala_gemini",
-                            query_vector=search_vec,
-                            limit=3
-                        )
+                    try:
+                        plan_prompt = f"Describe 1 ideal clothing item for a {event} in {weather}. Return ONLY the visual description."
+                        search_query = vision_model.generate_content(plan_prompt).text
+                        st.write(f"🔍 **Looking for:** {search_query}")
                         
-                        if hits:
-                            st.subheader("Found in Closet:")
-                            for hit in hits:
-                                st.success(f"**Item:** {hit.payload['short_name']}\n\nMatch Score: {int(hit.score*100)}%")
-                        else:
-                            st.warning("No matches found.")
+                        search_vec = get_gemini_embedding(search_query)
+                        
+                        if search_vec:
+                            hits = q_client.search(
+                                collection_name="itlala_gemini",
+                                query_vector=search_vec,
+                                limit=3
+                            )
+                            
+                            if hits:
+                                st.subheader("Found in Closet:")
+                                for hit in hits:
+                                    st.success(f"**Item:** {hit.payload['short_name']}\n\nMatch Score: {int(hit.score*100)}%")
+                            else:
+                                st.warning("No matches found.")
+                    except Exception as e:
+                        st.error(f"Styling Error: {e}")
 
 else:
     st.info("👈 Enter Keys to start.")
