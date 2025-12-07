@@ -1,4 +1,4 @@
 streamlit
 google-generativeai>=0.7.0
-qdrant-client
+qdrant-client>=1.7.0
 pillow
