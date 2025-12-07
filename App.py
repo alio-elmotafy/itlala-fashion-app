@@ -22,62 +22,64 @@ with st.sidebar:
 
     st.divider()
     
-    # Diagnostic Button (Updated to use Requests)
+    # Diagnostic Button
     if st.button("🛠️ Check Connectivity"):
         with st.status("Running Diagnostics...", expanded=True):
-            # 1. Check Gemini
+            # 1. Check Gemini (Listing available models to avoid 404)
             if gemini_key:
                 try:
                     genai.configure(api_key=gemini_key)
-                    # Try a simple generation to test auth
-                    model = genai.GenerativeModel('gemini-pro')
-                    response = model.generate_content("Hello")
-                    st.success("✅ Gemini Connected!")
+                    st.write("Checking Gemini Models...")
+                    # Get list of supported models for this key
+                    all_models = list(genai.list_models())
+                    supported = [m.name for m in all_models if 'generateContent' in m.supported_generation_methods]
+                    if supported:
+                        st.success(f"✅ Connected! Found: {supported[0]}")
+                        st.write(f"Available: {supported}")
+                    else:
+                        st.error("❌ Connected but no text models found for this key.")
                 except Exception as e:
                     st.error(f"❌ Gemini Error: {e}")
             
-            # 2. Check Hugging Face (Using Raw HTTP)
+            # 2. Check Hugging Face (NEW ROUTER URL)
             if hf_token:
                 try:
-                    API_URL = "https://api-inference.huggingface.co/models/sentence-transformers/clip-ViT-B-32"
+                    # UPDATED URL BASED ON ERROR 410
+                    API_URL = "https://router.huggingface.co/models/sentence-transformers/clip-ViT-B-32"
                     headers = {"Authorization": f"Bearer {hf_token}"}
                     response = requests.post(API_URL, headers=headers, json={"inputs": "test connection"})
                     
                     if response.status_code == 200:
-                        st.success("✅ Hugging Face Connected!")
+                        st.success("✅ Hugging Face (Router) Connected!")
                     else:
                         st.error(f"❌ HF Error ({response.status_code}): {response.text}")
                 except Exception as e:
                     st.error(f"❌ HF Connection Failed: {e}")
 
-# --- HELPER: ROBUST EMBEDDING (RAW REQUESTS) ---
+# --- HELPER: ROBUST EMBEDDING (NEW URL) ---
 def get_embedding(text=None, image_file=None):
     if not hf_token:
         st.error("Missing Hugging Face Token")
         return None
         
-    # We use the raw API URL directly - much more stable than the client library
-    API_URL = "https://api-inference.huggingface.co/models/sentence-transformers/clip-ViT-B-32"
+    # --- CRITICAL FIX: NEW HF ROUTER URL ---
+    API_URL = "https://router.huggingface.co/models/sentence-transformers/clip-ViT-B-32"
     headers = {"Authorization": f"Bearer {hf_token}"}
 
     try:
         payload = {}
         if text:
             payload = {"inputs": text}
-            # Send text request
             response = requests.post(API_URL, headers=headers, json=payload)
         elif image_file:
-            # Send image bytes directly
             img_bytes = image_file.getvalue()
             response = requests.post(API_URL, headers=headers, data=img_bytes)
         
-        # Check for errors
         if response.status_code != 200:
-            # Handle "Model Loading" error (503)
-            if "currently loading" in response.text:
-                st.warning("Model is loading on server... waiting 5 seconds.")
+            if "loading" in response.text.lower():
+                st.warning("Model is loading... waiting 5s.")
                 time.sleep(5)
-                return get_embedding(text, image_file) # Retry once
+                return get_embedding(text, image_file)
             
             st.error(f"HF API Error: {response.text}")
             return None
@@ -91,8 +93,10 @@ def get_embedding(text=None, image_file=None):
 # --- HELPER: SMART GEMINI CALL ---
 def get_gemini_response(prompt_text):
     genai.configure(api_key=gemini_key)
-    # Using gemini-pro as the safe default, trying others first
-    models_to_try = ['models/gemini-1.5-flash', 'gemini-pro']
+    
+    # Try names WITHOUT 'models/' prefix to avoid path doubling
+    # Also added 'gemini-1.5-flash-latest' which is often safer
+    models_to_try = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-pro', 'gemini-1.0-pro']
     
     last_error = None
     for model_name in models_to_try:
@@ -104,13 +108,12 @@ def get_gemini_response(prompt_text):
             last_error = e
             continue 
             
-    st.error(f"Gemini Failed. Please check API Key. Error: {last_error}")
+    st.error(f"Gemini Failed. Error details: {last_error}")
     return None
 
 # --- MAIN APP ---
 if gemini_key and hf_token and qdrant_url and qdrant_key:
     
-    # Initialize Qdrant
     try:
         q_client = QdrantClient(url=qdrant_url, api_key=qdrant_key)
     except Exception as e:
@@ -134,14 +137,11 @@ if gemini_key and hf_token and qdrant_url and qdrant_key:
                     vector = get_embedding(image_file=img_file)
                     
                     if vector is not None:
-                        # Handle varied API return types
                         if isinstance(vector, list) and len(vector) > 0 and isinstance(vector[0], list):
-                            vector = vector[0] # Unpack if nested
+                            vector = vector[0]
                             
-                        # Double check vector format (must be list of floats)
                         if isinstance(vector, list) and isinstance(vector[0], float):
                             try:
-                                # Create collection safe check
                                 if not q_client.collection_exists("itlala_closet"):
                                     q_client.create_collection(
                                         collection_name="itlala_closet",
@@ -162,7 +162,7 @@ if gemini_key and hf_token and qdrant_url and qdrant_key:
                             except Exception as e:
                                 st.error(f"Database Error: {e}")
                         else:
-                            st.error(f"Invalid Vector Format from AI: {str(vector)[:50]}...")
+                            st.error(f"Invalid Vector: {str(vector)[:50]}...")
 
     # --- TAB 2: RECOMMENDATION ---
     with tab2:
