@@ -2,7 +2,7 @@ import streamlit as st
 import google.generativeai as genai
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, VectorParams, Distance
-import requests
+from huggingface_hub import InferenceClient
 from PIL import Image
 import uuid
 import time
@@ -22,94 +22,79 @@ with st.sidebar:
 
     st.divider()
     
-    # Diagnostic Button
-    if st.button("🛠️ Check Connectivity"):
+    # Diagnostic Button (Auto-Fix)
+    if st.button("🛠️ Check & Fix"):
         with st.status("Running Diagnostics...", expanded=True):
-            # 1. Check Gemini (Listing available models to avoid 404)
+            # 1. Check Gemini
             if gemini_key:
                 try:
                     genai.configure(api_key=gemini_key)
-                    st.write("Checking Gemini Models...")
-                    # Get list of supported models for this key
-                    all_models = list(genai.list_models())
-                    supported = [m.name for m in all_models if 'generateContent' in m.supported_generation_methods]
-                    if supported:
-                        st.success(f"✅ Connected! Found: {supported[0]}")
-                        st.write(f"Available: {supported}")
-                    else:
-                        st.error("❌ Connected but no text models found for this key.")
+                    # Smart Select: Get the first available 'flash' model from user's list
+                    all_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                    # Prefer 2.5, then 2.0, then 1.5
+                    best_model = next((m for m in all_models if '2.5-flash' in m), 
+                                 next((m for m in all_models if '2.0-flash' in m), 
+                                 next((m for m in all_models if 'flash' in m), all_models[0])))
+                    
+                    st.success(f"✅ Gemini Connected! Selected: {best_model}")
+                    st.session_state['gemini_model_name'] = best_model
                 except Exception as e:
                     st.error(f"❌ Gemini Error: {e}")
             
-            # 2. Check Hugging Face (NEW ROUTER URL)
+            # 2. Check Hugging Face (Library Method)
             if hf_token:
                 try:
-                    # UPDATED URL BASED ON ERROR 410
-                    API_URL = "https://router.huggingface.co/models/sentence-transformers/clip-ViT-B-32"
-                    headers = {"Authorization": f"Bearer {hf_token}"}
-                    response = requests.post(API_URL, headers=headers, json={"inputs": "test connection"})
-                    
-                    if response.status_code == 200:
-                        st.success("✅ Hugging Face (Router) Connected!")
-                    else:
-                        st.error(f"❌ HF Error ({response.status_code}): {response.text}")
+                    # Using OpenAI's original CLIP model which is very stable on HF
+                    client = InferenceClient(token=hf_token)
+                    st.write("Testing HF connection...")
+                    client.feature_extraction("hello", model="openai/clip-vit-base-patch32")
+                    st.success("✅ Hugging Face Connected!")
                 except Exception as e:
-                    st.error(f"❌ HF Connection Failed: {e}")
+                    st.error(f"❌ HF Error: {e}")
 
-# --- HELPER: ROBUST EMBEDDING (NEW URL) ---
+# --- HELPER: ROBUST EMBEDDING (Library) ---
 def get_embedding(text=None, image_file=None):
     if not hf_token:
         st.error("Missing Hugging Face Token")
         return None
         
-    # --- CRITICAL FIX: NEW HF ROUTER URL ---
-    API_URL = "https://router.huggingface.co/models/sentence-transformers/clip-ViT-B-32"
-    headers = {"Authorization": f"Bearer {hf_token}"}
+    client = InferenceClient(token=hf_token)
+    # Switched to OpenAI CLIP - highly reliable
+    model_id = "openai/clip-vit-base-patch32"
 
     try:
-        payload = {}
         if text:
-            payload = {"inputs": text}
-            response = requests.post(API_URL, headers=headers, json=payload)
+            return client.feature_extraction(text, model=model_id)
         elif image_file:
-            img_bytes = image_file.getvalue()
-            response = requests.post(API_URL, headers=headers, data=img_bytes)
-        
-        if response.status_code != 200:
-            if "loading" in response.text.lower():
-                st.warning("Model is loading... waiting 5s.")
-                time.sleep(5)
-                return get_embedding(text, image_file)
-            
-            st.error(f"HF API Error: {response.text}")
-            return None
-            
-        return response.json()
-
+            image = Image.open(image_file)
+            return client.feature_extraction(image, model=model_id)
     except Exception as e:
-        st.error(f"Embedding Network Error: {e}")
+        # Fallback for "Model Loading"
+        if "503" in str(e):
+            st.warning("Model loading on server... retrying in 5s.")
+            time.sleep(5)
+            return get_embedding(text, image_file)
+        st.error(f"Embedding Error: {e}")
         return None
 
 # --- HELPER: SMART GEMINI CALL ---
 def get_gemini_response(prompt_text):
     genai.configure(api_key=gemini_key)
     
-    # Try names WITHOUT 'models/' prefix to avoid path doubling
-    # Also added 'gemini-1.5-flash-latest' which is often safer
-    models_to_try = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-pro', 'gemini-1.0-pro']
+    # 1. Try to use the auto-detected model from session state
+    if 'gemini_model_name' in st.session_state:
+        model_name = st.session_state['gemini_model_name']
+    else:
+        # 2. Fallback: Hardcoded list based on your diagnostics
+        model_name = 'models/gemini-2.5-flash' 
     
-    last_error = None
-    for model_name in models_to_try:
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(prompt_text)
-            return response.text
-        except Exception as e:
-            last_error = e
-            continue 
-            
-    st.error(f"Gemini Failed. Error details: {last_error}")
-    return None
+    try:
+        model = genai.GenerativeModel(model_name)
+        response = model.generate_content(prompt_text)
+        return response.text
+    except Exception as e:
+        st.error(f"Gemini Error ({model_name}): {e}")
+        return None
 
 # --- MAIN APP ---
 if gemini_key and hf_token and qdrant_url and qdrant_key:
@@ -137,10 +122,12 @@ if gemini_key and hf_token and qdrant_url and qdrant_key:
                     vector = get_embedding(image_file=img_file)
                     
                     if vector is not None:
+                        # Clean vector format
                         if isinstance(vector, list) and len(vector) > 0 and isinstance(vector[0], list):
                             vector = vector[0]
-                            
-                        if isinstance(vector, list) and isinstance(vector[0], float):
+                        
+                        # Verify vector dimensions (CLIP base is usually 512)
+                        if isinstance(vector, list) and len(vector) == 512:
                             try:
                                 if not q_client.collection_exists("itlala_closet"):
                                     q_client.create_collection(
@@ -162,7 +149,7 @@ if gemini_key and hf_token and qdrant_url and qdrant_key:
                             except Exception as e:
                                 st.error(f"Database Error: {e}")
                         else:
-                            st.error(f"Invalid Vector: {str(vector)[:50]}...")
+                            st.error(f"Vector Error: Expected 512 dim, got {len(vector) if isinstance(vector, list) else 'Invalid'}")
 
     # --- TAB 2: RECOMMENDATION ---
     with tab2:
@@ -183,10 +170,11 @@ if gemini_key and hf_token and qdrant_url and qdrant_key:
                         
                         # 2. Vector Search
                         search_vec = get_embedding(text=search_query)
+                         # Clean vector format
                         if isinstance(search_vec, list) and len(search_vec) > 0 and isinstance(search_vec[0], list):
                             search_vec = search_vec[0]
                         
-                        if isinstance(search_vec, list) and isinstance(search_vec[0], float):
+                        if isinstance(search_vec, list) and len(search_vec) == 512:
                             hits = q_client.search(
                                 collection_name="itlala_closet",
                                 query_vector=search_vec,
