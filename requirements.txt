@@ -1,0 +1,5 @@
+streamlit
+marqo
+google-generativeai
+pillow
+requests
