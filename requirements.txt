@@ -3,4 +3,3 @@ google-generativeai>=0.7.0
 qdrant-client
 requests
 pillow
-huggingface_hub
